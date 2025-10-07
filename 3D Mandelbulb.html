@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive 3D Mandelbulb</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column; /* Arrange items vertically */
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background-color: #000; /* Dark background for better contrast */
+            font-family: 'Inter', sans-serif; /* Use Inter font */
+            color: #fff; /* White text color */
+        }
+        canvas {
+            display: block;
+            width: 100%; /* Make canvas responsive */
+            height: calc(100% - 60px); /* Adjust height to make space for controls */
+        }
+        .controls {
+            position: relative; /* Changed from absolute to relative */
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 60px; /* Fixed height for controls */
+            background-color: rgba(0, 0, 0, 0.7);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 10px 0;
+            box-sizing: border-box;
+            z-index: 10; /* Ensure controls are above canvas */
+            border-top-left-radius: 10px; /* Rounded corners */
+            border-top-right-radius: 10px;
+        }
+        button {
+            background-color: #4CAF50; /* Green */
+            border: none;
+            color: white;
+            padding: 10px 20px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            margin: 4px 2px;
+            cursor: pointer;
+            border-radius: 8px; /* Rounded corners */
+            transition: background-color 0.3s ease;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:active {
+            background-color: #3e8e41;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+            transform: translateY(1px);
+        }
+        input[type="file"] {
+            display: none; /* Hide the default file input */
+        }
+        .custom-file-upload {
+            background-color: #008CBA; /* Blue */
+            border: none;
+            color: white;
+            padding: 10px 20px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            margin: 4px 2px;
+            cursor: pointer;
+            border-radius: 8px; /* Rounded corners */
+            transition: background-color 0.3s ease;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .custom-file-upload:hover {
+            background-color: #007bb5;
+        }
+        .custom-file-upload:active {
+            background-color: #006080;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+            transform: translateY(1px);
+        }
+    </style>
+</head>
+<body>
+    <!-- Hidden Audio Element -->
+    <audio id="audioElement" crossorigin="anonymous"></audio>
+
+    <!-- Controls for Audio Playback and File Upload -->
+    <div class="controls">
+        <input type="file" id="audioFileInput" accept="audio/*">
+        <label for="audioFileInput" class="custom-file-upload">Load Audio File</label>
+        <button id="playPauseButton" disabled>Play Audio</button>
+    </div>
+
+    <!-- Three.js library from CDN -->
+    <script src="three.min.js"></script>
+    <script>
+        let scene, camera, renderer, pointCloud;
+        let isDragging = false;
+        let previousMouseX = 0;
+        let previousMouseY = 0;
+
+        // Global variables for color cycling
+        let colorCycleOffset = 0;
+        const colorCycleSpeed = 0.0005; // Adjust this value for faster/slower color cycling
+        const tempColor = new THREE.Color(); // Re-use a single color object for efficiency
+
+        // Global variables for fractal global movement
+        let movementOffset = 0;
+        const movementSpeed = 0.0005; // Adjust this for faster/slower overall movement
+        const movementAmplitude = 0.5; // How far the fractal moves from its center
+
+        // Global variables for individual point morphing
+        let morphTime = 0;
+        const morphSpeed = 0.005; // Speed of individual point morphing
+        let morphAmplitude = 0.05; // Amplitude of individual point morphing (now dynamic)
+        const baseMorphAmplitude = 0.05; // Base amplitude when no audio is playing or low volume
+        const audioSensitivity = 0.25; // How much audio affects morph amplitude
+
+        // Web Audio API variables
+        let audioContext;
+        let analyser;
+        let audioSource;
+        let audioData;
+        let audioElement;
+        let playPauseButton;
+        let audioFileInput;
+
+        // Initialize the Three.js scene, camera, and renderer
+        function init() {
+            // Scene setup
+            scene = new THREE.Scene();
+
+            // Camera setup: PerspectiveCamera(FOV, Aspect Ratio, Near, Far)
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 3; // Position the camera back to view the fractal
+
+            // Renderer setup: WebGLRenderer for 3D graphics
+            renderer = new THREE.WebGLRenderer({ antialias: true }); // Enable antialiasing for smoother edges
+            renderer.setSize(window.innerWidth, window.innerHeight - 60); // Adjust renderer size for controls
+            document.body.insertBefore(renderer.domElement, document.querySelector('.controls')); // Add canvas before controls
+
+            // Parameters for Mandelbulb calculation
+            const iterations = 12;    // Number of iterations for fractal calculation (reduced for performance with morphing)
+            const power = 12;         // Mandelbulb power (common values are 8 or 12)
+            const size = 1.2;        // Size of the volume to sample (e.g., from -1.5 to 1.5 on each axis)
+            const resolution = 0.05; // Step size for sampling (increased for performance with morphing)
+
+            const positions = []; // Array to store current vertex positions (will be updated)
+            const originalPositions = []; // Array to store initial vertex positions (for morphing reference)
+            const colors = [];    // Array to store vertex colors
+            const normalizedDistances = []; // Array to store normalized distances for color cycling
+
+            // Mandelbulb calculation loop
+            // Iterates through a 3D grid to find points belonging to the Mandelbulb set
+            for (let x = -size; x <= size; x += resolution) {
+                for (let y = -size; y <= size; y += resolution) {
+                    for (let z = -size; z <= size; z += resolution) {
+                        let zx = x;
+                        let zy = y;
+                        let zz = z;
+                        let i = 0; // Iteration counter
+
+                        // Iterate to check if the point is in the Mandelbulb set
+                        while (i < iterations) {
+                            // Convert Cartesian coordinates (zx, zy, zz) to spherical coordinates (r, theta, phi)
+                            const r = Math.sqrt(zx * zx + zy * zy + zz * zz); // Radius
+                            if (r > 2) break; // Escape condition: if radius exceeds 2, point is outside the set
+
+                            const theta = Math.atan2(Math.sqrt(zx * zx + zy * zy), zz); // Polar angle
+                            const phi = Math.atan2(zy, zx); // Azimuthal angle
+
+                            // Apply Mandelbulb formula (power 8) in spherical coordinates
+                            const newR = Math.pow(r, power);
+                            const newTheta = theta * power;
+                            const newPhi = phi * power;
+
+                            // Convert back to Cartesian coordinates and add initial offset (x, y, z)
+                            zx = newR * Math.sin(newTheta) * Math.cos(newPhi) + x;
+                            zy = newR * Math.sin(newTheta) * Math.sin(newPhi) + y;
+                            zz = newR * Math.cos(newTheta) + z;
+
+                            i++; // Increment iteration counter
+                        }
+
+                        // If the point did not escape after 'iterations', it's considered part of the Mandelbulb
+                        if (i === iterations) {
+                            positions.push(x, y, z); // Add current position to the array
+                            originalPositions.push(x, y, z); // Store original position for morphing
+
+                            // Calculate distance from the center
+                            const distance = Math.sqrt(x * x + y * y + z * z);
+                            // Normalize distance to a 0-1 range for color mapping
+                            const normalizedDistance = Math.min(1, distance / size);
+                            normalizedDistances.push(normalizedDistance); // Store for dynamic color cycling
+
+                            // Initial color calculation using HSL (Hue, Saturation, Lightness)
+                            const hue = 0.6 - (normalizedDistance * 0.6); // Blue to Red gradient
+                            const saturation = 1.0; // Full saturation
+                            const lightness = 0.5 + (normalizedDistance * 0.2); // Vary lightness slightly
+
+                            tempColor.setHSL(hue, saturation, lightness);
+                            colors.push(tempColor.r, tempColor.g, tempColor.b); // Add RGB components to the colors array
+                        }
+                    }
+                }
+            }
+
+            // Create geometry using BufferGeometry for efficient handling of many points
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3)); // 3 components per position (x, y, z)
+            geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));       // 3 components per color (r, g, b)
+            // Store original positions as a custom attribute for efficient morphing
+            geometry.setAttribute('originalPosition', new THREE.Float32BufferAttribute(originalPositions, 3));
+            // Store normalized distances as a custom attribute for efficient color cycling
+            geometry.setAttribute('normalizedDistance', new THREE.Float32BufferAttribute(normalizedDistances, 1));
+
+            // Create material for the points
+            const material = new THREE.PointsMaterial({
+                size: 0.015, // Size of each point
+                vertexColors: true, // Use colors from the geometry's 'color' attribute
+                blending: THREE.AdditiveBlending, // Optional: for glowing effect
+                transparent: true, // Optional: for glowing effect
+                opacity: 0.8 // Optional: for glowing effect
+            });
+
+            // Create the point cloud object and add it to the scene
+            pointCloud = new THREE.Points(geometry, material);
+            scene.add(pointCloud);
+
+            // --- Web Audio API Setup ---
+            audioElement = document.getElementById('audioElement');
+            playPauseButton = document.getElementById('playPauseButton');
+            audioFileInput = document.getElementById('audioFileInput');
+
+            // Event listener for file input change
+            audioFileInput.addEventListener('change', (event) => {
+                const file = event.target.files[0];
+                if (file) {
+                    const fileURL = URL.createObjectURL(file);
+                    audioElement.src = fileURL;
+                    audioElement.load(); // Load the new audio source
+                    playPauseButton.disabled = false; // Enable play/pause button
+                    playPauseButton.textContent = 'Play Audio'; // Reset button text
+                    
+                    // Re-initialize audio context if it was already created for a previous file
+                    if (audioContext) {
+                        audioContext.close().then(() => {
+                            audioContext = null; // Reset context to be re-initialized on next play
+                            analyser = null;
+                            audioSource = null;
+                        });
+                    }
+                }
+            });
+
+            // Event listener for play/pause button
+            playPauseButton.addEventListener('click', () => {
+                // Initialize audio context only when user interacts with play
+                if (!audioContext) {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    analyser = audioContext.createAnalyser();
+                    audioSource = audioContext.createMediaElementSource(audioElement);
+
+                    // Connect nodes: audio source -> analyser -> audio context destination (speakers)
+                    audioSource.connect(analyser);
+                    analyser.connect(audioContext.destination);
+
+                    analyser.fftSize = 256; // Fast Fourier Transform size (power of 2)
+                    audioData = new Uint8Array(analyser.frequencyBinCount); // Array to hold frequency data
+                }
+
+                if (audioElement.paused) {
+                    audioElement.play().catch(e => console.error("Audio playback failed:", e));
+                    playPauseButton.textContent = 'Pause Audio';
+                } else {
+                    audioElement.pause();
+                    playPauseButton.textContent = 'Play Audio';
+                }
+            });
+
+            // Add mouse event listeners for interaction
+            renderer.domElement.addEventListener('mousedown', onMouseDown, false);
+            renderer.domElement.addEventListener('mousemove', onMouseMove, false);
+            renderer.domElement.addEventListener('mouseup', onMouseUp, false);
+            renderer.domElement.addEventListener('mouseleave', onMouseUp, false); // Stop dragging if mouse leaves canvas
+            renderer.domElement.addEventListener('wheel', onMouseWheel, false); // Add mouse wheel listener
+        }
+
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate); // Request the next animation frame
+
+            // Add a small, constant rotation to the point cloud
+            pointCloud.rotation.y += 0.001; // Adjust this value for faster/slower rotation
+
+            // Update color cycle offset
+            colorCycleOffset = (colorCycleOffset + colorCycleSpeed) % 1;
+
+            // Update colors based on current offset
+            const colorsArray = pointCloud.geometry.attributes.color.array;
+            const normalizedDistancesArray = pointCloud.geometry.attributes.normalizedDistance.array;
+
+            for (let i = 0; i < normalizedDistancesArray.length; i++) {
+                const currentNormalizedDistance = normalizedDistancesArray[i];
+                // Calculate hue with offset, ensuring it wraps around 0-1
+                const hue = (0.6 - (currentNormalizedDistance * 0.6) + colorCycleOffset) % 1;
+                const saturation = 1.0;
+                const lightness = 0.5 + (currentNormalizedDistance * 0.2);
+
+                tempColor.setHSL(hue, saturation, lightness);
+
+                // Update RGB values in the colors array
+                colorsArray[i * 3]     = tempColor.r;
+                colorsArray[i * 3 + 1] = tempColor.g;
+                colorsArray[i * 3 + 2] = tempColor.b;
+            }
+            pointCloud.geometry.attributes.color.needsUpdate = true; // Important: tell Three.js to update the buffer
+
+            // Update fractal global movement offset and apply to point cloud position
+            movementOffset += movementSpeed;
+            pointCloud.position.x = Math.sin(movementOffset) * movementAmplitude;
+            pointCloud.position.z = Math.cos(movementOffset * 0.85) * movementAmplitude; // Slightly different speed for Z to create a more complex path
+
+            // --- Audio Reactivity for Individual Point Morphing ---
+            if (analyser && !audioElement.paused) {
+                analyser.getByteFrequencyData(audioData); // Get frequency data
+                let sum = 0;
+                for (let i = 0; i < audioData.length; i++) {
+                    sum += audioData[i];
+                }
+                const averageFrequency = sum / audioData.length;
+
+                // Map average frequency to morphAmplitude
+                // Normalize averageFrequency (0-255) to a 0-1 range and apply sensitivity
+                morphAmplitude = baseMorphAmplitude + (averageFrequency / 255) * audioSensitivity;
+            } else {
+                // If audio is paused or not playing, revert to base morph amplitude
+                morphAmplitude = baseMorphAmplitude;
+            }
+
+            // Update individual point morphing
+            morphTime += morphSpeed;
+            const positionsArray = pointCloud.geometry.attributes.position.array;
+            const originalPositionsArray = pointCloud.geometry.attributes.originalPosition.array;
+
+            for (let i = 0; i < originalPositionsArray.length / 3; i++) {
+                const ox = originalPositionsArray[i * 3];
+                const oy = originalPositionsArray[i * 3 + 1];
+                const oz = originalPositionsArray[i * 3 + 2];
+
+                // Apply a sine wave based on original position and time, now using dynamic morphAmplitude
+                positionsArray[i * 3] = ox + Math.sin(morphTime + ox * 10) * morphAmplitude;
+                positionsArray[i * 3 + 1] = oy + Math.cos(morphTime * 0.8 + oy * 10) * morphAmplitude;
+                positionsArray[i * 3 + 2] = oz + Math.sin(morphTime * 1.2 + oz * 10) * morphAmplitude;
+            }
+            pointCloud.geometry.attributes.position.needsUpdate = true; // Tell Three.js to update the position buffer
+
+            // Render the scene with the camera
+            renderer.render(scene, camera);
+        }
+
+        // Event handler for mouse down
+        function onMouseDown(event) {
+            isDragging = true;
+            previousMouseX = event.clientX;
+            previousMouseY = event.clientY;
+            // Prevent default behavior to avoid text selection or other browser actions
+            event.preventDefault();
+        }
+
+        // Event handler for mouse move
+        function onMouseMove(event) {
+            if (!isDragging) return; // Only process if dragging
+
+            const deltaX = event.clientX - previousMouseX;
+            const deltaY = event.clientY - previousMouseY;
+
+            // Rotate the point cloud based on mouse movement
+            // Adjust sensitivity by multiplying delta values
+            pointCloud.rotation.y += deltaX * 0.005; // Rotate around Y-axis for horizontal movement
+            pointCloud.rotation.x += deltaY * 0.005; // Rotate around X-axis for vertical movement
+
+            previousMouseX = event.clientX;
+            previousMouseY = event.clientY;
+        }
+
+        // Event handler for mouse up
+        function onMouseUp(event) {
+            isDragging = false;
+        }
+
+        // Event handler for mouse wheel (zoom)
+        function onMouseWheel(event) {
+            event.preventDefault(); // Prevent page scrolling
+
+            // Adjust camera Z position based on wheel direction
+            // event.deltaY is positive when scrolling down (zoom out), negative when scrolling up (zoom in)
+            camera.position.z += event.deltaY * 0.001; // Adjust zoom speed
+
+            // Clamp camera position to prevent zooming too far in or out
+            camera.position.z = Math.max(0.5, Math.min(10, camera.position.z));
+        }
+
+        // Handle window resize event
+        window.addEventListener('resize', () => {
+            // Update camera aspect ratio
+            camera.aspect = window.innerWidth / (window.innerHeight - 60); // Adjust for controls height
+            camera.updateProjectionMatrix(); // Update the camera's projection matrix
+
+            // Update renderer size
+            renderer.setSize(window.innerWidth, window.innerHeight - 60); // Adjust for controls height
+        });
+
+        // Initialize the simulation when the window loads
+        window.onload = function() {
+            init();    // Setup the Three.js scene and Mandelbulb
+            animate(); // Start the animation loop
+        };
+    </script>
+</body>
+</html>
